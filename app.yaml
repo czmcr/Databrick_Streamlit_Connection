@@ -1,0 +1,12 @@
+bundle:
+  name: genie-streamlit-app
+
+resources:
+  apps:
+    genie-streamlit:
+      type: streamlit
+      source_path: .
+      resources:
+        - genie_space: my-genie-room
+        - sql_warehouse: my-sql-warehouse
+
