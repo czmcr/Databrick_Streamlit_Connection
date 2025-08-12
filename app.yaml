@@ -6,7 +6,7 @@ resources:
     genie-streamlit:
       type: streamlit
       source_path: .
-      entrypoint: app.py
+      entrypoint: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
       resources:
         - genie_space: 01f06de6b16c1cc19ba4c336056c73d2
         - sql_warehouse: 809dc1cb59e0c1cb
