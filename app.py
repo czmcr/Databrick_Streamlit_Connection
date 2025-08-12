@@ -1,43 +1,115 @@
-import os
+import os, time, requests, json
 import streamlit as st
-from databricks import sql
+import pandas as pd
 from dotenv import load_dotenv
-from tabulate import tabulate
 
-def load_env_vars():
-    load_dotenv()
-    access_token = os.getenv("ACCESS_TOKEN")
-    host = os.getenv("HOST")
-    http_path = os.getenv("HTTP_PATH")
-    return access_token, host, http_path
+load_dotenv()
 
-def get_connection(access_token, host, http_path):
-    return sql.connect(
-        server_hostname=host,
-        http_path=http_path,
-        access_token=access_token
-    )
+HOST = os.environ.get("DATABRICKS_HOST") 
+TOKEN = os.environ.get("DATABRICKS_TOKEN")
+SPACE_ID = os.environ.get("GENIE_SPACE_ID")
+HEADERS = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
 
-def fetch_data(cursor, query):
-    cursor.execute(query)
-    rows = cursor.fetchall()
-    headers = [desc[0] for desc in cursor.description]
-    return rows, headers
+if not (HOST and TOKEN and SPACE_ID):
+    st.error("Set DATABRICKS_HOST, DATABRICKS_TOKEN, and GENIE_SPACE_ID env vars.")
+    st.stop()
 
-def display_table(rows, headers):
-    print(tabulate(rows, headers=headers, tablefmt="grid"))
+# ---- Updated to new Conversation API ----
+def start_conversation(user_text):
+    url = f"{HOST}/api/2.0/genie/spaces/{SPACE_ID}/start-conversation"
+    payload = {
+        "messages": [
+            {"role": "user", "text": user_text}
+        ]
+    }
+    resp = requests.post(url, headers=HEADERS, json=payload)
+    resp.raise_for_status()
+    return resp.json()
 
-def main():
-    access_token, host, http_path = load_env_vars()
-    connection = get_connection(access_token, host, http_path)
-    cursor = connection.cursor()
-    query = "SELECT Id from access_source.salesforce.case limit 5"
-    rows, headers = fetch_data(cursor, query)
-    display_table(rows, headers)
-    cursor.close()
-    connection.close()
+def send_message(conversation_id, user_text):
+    url = f"{HOST}/api/2.0/genie/spaces/{SPACE_ID}/conversations/{conversation_id}/messages"
+    payload = {
+        "messages": [
+            {"role": "user", "text": user_text}
+        ]
+    }
+    resp = requests.post(url, headers=HEADERS, json=payload)
+    resp.raise_for_status()
+    return resp.json()
+# -----------------------------------------
 
-if __name__ == "__main__":
-    main()
+def get_message(space_id, conversation_id, message_id):
+    url = f"{HOST}/api/2.0/genie/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}"
+    resp = requests.get(url, headers=HEADERS)
+    resp.raise_for_status()
+    return resp.json()
 
+def poll_message(space_id, conversation_id, message_id, timeout_s=600):
+    start = time.time()
+    wait = 5
+    while time.time() - start < timeout_s:
+        msg = get_message(space_id, conversation_id, message_id)
+        status = msg.get("status")
+        if status in ("COMPLETED", "FAILED", "CANCELLED"):
+            return msg
+        time.sleep(wait)
+        if time.time() - start > 120:
+            wait = min(wait * 2, 60)
+    raise TimeoutError("No final message status within timeout")
 
+def fetch_query_result(space_id, conversation_id, message_id, attachment_id):
+    url = f"{HOST}/api/2.0/genie/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}/attachments/{attachment_id}/query-result"
+    resp = requests.get(url, headers=HEADERS)
+    resp.raise_for_status()
+    return resp.json()
+
+# Streamlit UI
+st.title("Genie — Streamlit chat (REST API)")
+
+if "conversation_id" not in st.session_state:
+    st.session_state.conversation_id = None
+
+q = st.text_input("Ask Genie about your data:")
+
+if st.button("Send") and q.strip():
+    with st.spinner("Sending to Genie..."):
+        if st.session_state.conversation_id is None:
+            r = start_conversation(q)
+            conv = r.get("conversation", {})
+            msg = r.get("message", {})
+            conv_id = conv.get("id")
+            msg_id = msg.get("id")
+            st.session_state.conversation_id = conv_id
+        else:
+            conv_id = st.session_state.conversation_id
+            r = send_message(conv_id, q)
+            msg = r.get("message", {})
+            msg_id = msg.get("id")
+
+        final_msg = poll_message(SPACE_ID, conv_id, msg_id)
+        st.write("Status:", final_msg.get("status"))
+
+        text = final_msg.get("text") or final_msg.get("content")
+        if text:
+            st.subheader("Genie text")
+            st.write(text)
+
+        attachments = final_msg.get("attachments") or []
+        if attachments:
+            for a in attachments:
+                if a.get("query"):
+                    st.subheader("Generated SQL")
+                    st.code(a["query"], language="sql")
+                attachment_id = a.get("attachment_id")
+                if attachment_id:
+                    res = fetch_query_result(SPACE_ID, conv_id, msg_id, attachment_id)
+                    cols = [c.get("name") for c in res.get("columns", [])] if res.get("columns") else None
+                    data = res.get("data") or res.get("rows") or []
+                    if cols and data:
+                        df = pd.DataFrame(data, columns=cols)
+                        st.subheader("Query results")
+                        st.dataframe(df, use_container_width=True)
+                    else:
+                        st.write("Query result (raw):", res)
+        else:
+            st.info("No attachments (no SQL / results produced).")
