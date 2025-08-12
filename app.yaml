@@ -4,7 +4,7 @@ bundle:
 resources:
   apps:
     genie-streamlit:
-      type: streamlit
+      type: python
       source_path: .
       entrypoint: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
       resources:
