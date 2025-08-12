@@ -14,35 +14,29 @@ if not (HOST and TOKEN and SPACE_ID):
     st.error("Set DATABRICKS_HOST, DATABRICKS_TOKEN, and GENIE_SPACE_ID env vars.")
     st.stop()
 
-# ---- Updated to new Conversation API ----
+
 def start_conversation(user_text):
     url = f"{HOST}/api/2.0/genie/spaces/{SPACE_ID}/start-conversation"
-    payload = {
-        "messages": [
-            {"role": "user", "text": user_text}
-        ]
-    }
+    payload = {"content": user_text}
     resp = requests.post(url, headers=HEADERS, json=payload)
     resp.raise_for_status()
     return resp.json()
 
+
 def send_message(conversation_id, user_text):
     url = f"{HOST}/api/2.0/genie/spaces/{SPACE_ID}/conversations/{conversation_id}/messages"
-    payload = {
-        "messages": [
-            {"role": "user", "text": user_text}
-        ]
-    }
+    payload = {"messages": [{"role": "user", "text": user_text}]}
     resp = requests.post(url, headers=HEADERS, json=payload)
     resp.raise_for_status()
     return resp.json()
-# -----------------------------------------
+
 
 def get_message(space_id, conversation_id, message_id):
     url = f"{HOST}/api/2.0/genie/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}"
     resp = requests.get(url, headers=HEADERS)
     resp.raise_for_status()
     return resp.json()
+
 
 def poll_message(space_id, conversation_id, message_id, timeout_s=600):
     start = time.time()
@@ -57,11 +51,13 @@ def poll_message(space_id, conversation_id, message_id, timeout_s=600):
             wait = min(wait * 2, 60)
     raise TimeoutError("No final message status within timeout")
 
+
 def fetch_query_result(space_id, conversation_id, message_id, attachment_id):
     url = f"{HOST}/api/2.0/genie/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}/attachments/{attachment_id}/query-result"
     resp = requests.get(url, headers=HEADERS)
     resp.raise_for_status()
     return resp.json()
+
 
 # Streamlit UI
 st.title("Genie — Streamlit chat (REST API)")
@@ -89,6 +85,7 @@ if st.button("Send") and q.strip():
         final_msg = poll_message(SPACE_ID, conv_id, msg_id)
         st.write("Status:", final_msg.get("status"))
 
+        # Genie text output
         text = final_msg.get("text") or final_msg.get("content")
         if text:
             st.subheader("Genie text")
@@ -100,16 +97,20 @@ if st.button("Send") and q.strip():
                 if a.get("query"):
                     st.subheader("Generated SQL")
                     st.code(a["query"], language="sql")
+
                 attachment_id = a.get("attachment_id")
                 if attachment_id:
                     res = fetch_query_result(SPACE_ID, conv_id, msg_id, attachment_id)
-                    cols = [c.get("name") for c in res.get("columns", [])] if res.get("columns") else None
-                    data = res.get("data") or res.get("rows") or []
-                    if cols and data:
-                        df = pd.DataFrame(data, columns=cols)
-                        st.subheader("Query results")
+
+                    # --- NEW: Extract columns + rows from Genie JSON ---
+                    try:
+                        columns = [col["name"] for col in res["statement_response"]["manifest"]["schema"]["columns"]]
+                        data = res["statement_response"]["result"]["data_array"]
+                        df = pd.DataFrame(data, columns=columns)
+                        st.subheader("Query Results")
                         st.dataframe(df, use_container_width=True)
-                    else:
-                        st.write("Query result (raw):", res)
+                    except KeyError:
+                        st.warning("Could not parse results into a table — showing raw JSON.")
+                        st.json(res)
         else:
             st.info("No attachments (no SQL / results produced).")
